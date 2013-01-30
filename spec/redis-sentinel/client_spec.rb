@@ -1,7 +1,10 @@
 require "spec_helper"
 
 describe Redis::Client do
-  let(:redis) { mock("Redis", :sentinel => ["remote.server", 8888])}
+  let(:info) {{'role' => 'master'}}
+  let(:redis) { mock("Redis", :sentinel => ["remote.server", 8888],
+                              :info => info,
+                              :quit => nil)}
 
   subject { Redis::Client.new(:master_name => "master",
                               :sentinels => [{:host => "localhost", :port => 26379},
@@ -27,12 +30,6 @@ describe Redis::Client do
     end
   end
 
-  context "#try_next_sentinel" do
-    it "should return next sentinel server" do
-      expect(subject.try_next_sentinel).to eq({:host => "localhost", :port => 26380})
-    end
-  end
-
   context "#discover_master" do
     it "gets the current master" do
       redis.should_receive(:sentinel).
@@ -46,12 +43,17 @@ describe Redis::Client do
       expect(subject.port).to eq 8888
     end
 
-    describe "memoizing sentinel connections" do
-      it "does not reconnect to the sentinels" do
-        Redis.should_receive(:new).once
+    it "confirms that the elected master is actually master" do
+      redis.should_receive(:info)
 
-        subject.discover_master
-        subject.discover_master
+      subject.discover_master
+    end
+
+    context "master takes too long to become master" do
+      let(:info) {{'role' => 'slave'}}
+
+      it "raises a connection error" do
+        expect { subject.discover_master }.to raise_error(Redis::ConnectionError)
       end
     end
   end
