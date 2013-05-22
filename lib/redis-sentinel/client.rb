@@ -49,17 +49,21 @@ class Redis::Client
     def discover_master
       loop do
         begin
-          host, port = get_master_connection_from_sentinel
+          master = get_master_connection_from_sentinel
         rescue Redis::CannotConnectError
           try_next_sentinel
         else
-          if !host && !port
+          if master.unknown?
             raise Redis::ConnectionError.new("No master named: #{@master_name}")
           end
 
-          wait_until_master_failover_complete(host, port)
+          unless master.available?
+            raise Redis::CannotConnectError.new("The master: #{@master_name} is currently not available.")
+          end
 
-          reconfigure_connection_with_new_master(host, port)
+          wait_until_master_failover_complete(master)
+
+          reconfigure_connection_with_new_master(master)
 
           break
         end
@@ -79,31 +83,47 @@ class Redis::Client
       @sentinels[0]
     end
 
-    def reconfigure_connection_with_new_master(host, port)
-      @options.merge!(:host => host, :port => port.to_i)
+    def reconfigure_connection_with_new_master(master)
+      @options.merge!(:host => master.host, :port => master.port)
+    end
+
+    RedisMasterConnection = Struct.new(:host, :port, :is_down, :runid) do
+      alias_method :down?, :is_down
+
+      def unknown?
+        host.nil? && port == 0
+      end
+
+      def available?
+        !down? && runid != '?'
+      end
     end
 
     def get_master_connection_from_sentinel
       sentinel = Redis.new(current_sentinel_config)
       host, port = sentinel.sentinel("get-master-addr-by-name", @master_name)
+      if host && port
+        is_down, runid = sentinel.sentinel("is-master-down-by-addr", host, port)
+      end
       sentinel.quit
-      return [host, port]
+
+      RedisMasterConnection.new(host, port.to_i, is_down == 1, runid)
     end
 
-    def wait_until_master_failover_complete(host, port)
+    def wait_until_master_failover_complete(master)
       deadline = @failover_reconnect_timeout.to_i + Time.now.to_f
-      until master_failover_complete?(host, port.to_i)
+      until master_failover_complete?(master)
         if  Time.now.to_f < deadline
           sleep @failover_reconnect_wait
         else
-          raise Redis::ConnectionError.new("Elected master #{host} #{port} took too long to leave slave role")
+          raise Redis::ConnectionError.new("Elected master #{master.host} #{master.port} took too long to leave slave role")
         end
       end
     end
 
-    def master_failover_complete?(host, port)
+    def master_failover_complete?(master)
       begin
-        client = Redis.new(:host => host, :port => port)
+        client = Redis.new(:host => master.host, :port => master.port)
         client.info['role'] == 'master'
       ensure
         client.quit

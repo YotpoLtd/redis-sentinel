@@ -2,8 +2,7 @@ require "spec_helper"
 
 describe Redis::Client do
   let(:info) {{'role' => 'master'}}
-  let(:redis) { mock("Redis", :sentinel => ["remote.server", 8888],
-                              :info => info,
+  let(:redis) { mock("Redis", :info => info,
                               :quit => nil)}
 
   subject { Redis::Client.new(:master_name => "master",
@@ -31,16 +30,34 @@ describe Redis::Client do
   end
 
   context "#discover_master" do
+    let(:get_master_addr_by_name) { ["remote.server", 8888] }
+    let(:is_master_down_by_addr) { [0, "abc"] }
+
+    before(:each) do
+      redis.stub(:sentinel).and_return do |command, *args|
+        case command
+        when "get-master-addr-by-name"
+          get_master_addr_by_name
+        when "is-master-down-by-addr"
+          is_master_down_by_addr
+        end
+      end
+    end
+
     it "gets the current master" do
-      redis.should_receive(:sentinel).
-            with("get-master-addr-by-name", "master")
+      redis.should_receive(:sentinel).with("get-master-addr-by-name", "master")
+      subject.discover_master
+    end
+
+    it "checks to see if the current master is down" do
+      redis.should_receive(:sentinel).with("is-master-down-by-addr", "remote.server", 8888)
       subject.discover_master
     end
 
     it "should update options" do
       subject.discover_master
-      expect(subject.host).to eq "remote.server"
-      expect(subject.port).to eq 8888
+      subject.host.should == "remote.server"
+      subject.port.should == 8888
     end
 
     it "confirms that the elected master is actually master" do
@@ -49,11 +66,27 @@ describe Redis::Client do
       subject.discover_master
     end
 
+    context "no master by that name" do
+      let(:get_master_addr_by_name) { [nil, nil] }
+
+      it "raises a connection error" do
+        expect { subject.discover_master }.to raise_error(Redis::ConnectionError)
+      end
+    end
+
     context "master takes too long to become master" do
       let(:info) {{'role' => 'slave'}}
 
       it "raises a connection error" do
         expect { subject.discover_master }.to raise_error(Redis::ConnectionError)
+      end
+    end
+
+    context "current master is down" do
+      let(:is_master_down_by_addr) { [1, "abc"] }
+
+      it "raises a connection error" do
+        expect { subject.discover_master }.to raise_error(Redis::CannotConnectError)
       end
     end
   end
